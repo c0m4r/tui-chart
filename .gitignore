@@ -1,0 +1,13 @@
+# build output
+/tui-chart
+/dist/
+
+# local toolchain caches (see scripts/env.sh)
+/.gocache/
+
+# scratch space for captures and previews
+/.preview/
+
+# rendered screenshots are ignored, but the README ones are tracked
+*.png
+!docs/*.png

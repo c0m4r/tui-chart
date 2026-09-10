@@ -1,0 +1,15 @@
+[2J[H[?2004h[?1000h[?1006h[?9999h[?25l[7m status: streaming               [K[0m
+connecting[K[32mconnected[0m
+tab	here	and	columns
+[5;10r[5;1Hregion line 1
+region line 2
+region line 3
+region line 4
+region line 5
+region line 6
+[5;1H[Linserted line
+[6;1H[Mdeleted line
+[7;3H[3@<<[8;3H[4P>>[9;1H[Safter SU[r[13;1Hwide: 中文テスト mixing é and å marks[14;1Hbox mix: ┌─┬─┐  ╔═╦═╗  ╭─┼─╮  █▓▒░ ⣿⣀[16;1Hstale content that will be overwritten[16;1H[2K┌─ panel repainted ────────────┐[17;1H│ [1;38;2;120;200;255mtruecolor inside a frame[0m │[18;1H└──────────────────────────────┘[20;1H[?7lno-wrap:XXXXXXXXXXXXXXXXXXXX[20;96HZYXWVUTSRQ[?7hZ#8(B)0[>4;2mPq#0;2;0;0;0\]0;window title (ignored)\
+�� tail
+[1;31;40mred on black[0m [0;7minverse[0m
+]0;unterminated osc at eof

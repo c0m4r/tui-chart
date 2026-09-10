@@ -1,0 +1,4 @@
+#!/bin/sh
+# ansipng -- thin wrapper so the tool can be called directly:
+#   tools/ansipng/ansipng capture.bin shot.png -w 100 -r 30
+exec python3 "$(dirname "$0")/ansipng.py" "$@"
