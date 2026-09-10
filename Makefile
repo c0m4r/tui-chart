@@ -14,11 +14,11 @@ GO       := go
 all: build
 
 build:
-	$(GO) build -o $(BIN) $(PKG)
+	CGO_ENABLED=0 $(GO) build -o $(BIN) $(PKG)
 
 # Build with a stripped binary and version stamp.
 release:
-	$(GO) build -trimpath -ldflags "-s -w -X main.version=$$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o $(BIN) $(PKG)
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w -X main.version=$$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o $(BIN) $(PKG)
 
 run: build
 	./$(BIN)
