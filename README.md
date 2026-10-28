@@ -33,6 +33,8 @@ charting engine underneath that can also print a single chart to stdout.
 **Interface**
 - Live source sidebar with a sparkline and current value per metric; the active
   one is highlighted, click any card to focus it.
+- Chart any shell command or stdin stream: numeric output becomes a source with
+  the same history, zoom, statistics and renderers as the built-in metrics.
 - Per-source summary/breakdown views, statistics strip (cur/avg/min/max/p95),
   statistics table, keyboard reference overlay.
 - Six themes (midnight, nord, gruvbox, dracula, light, mono), pause/resume,
@@ -48,6 +50,9 @@ charting engine underneath that can also print a single chart to stdout.
   that runs the real binary and can turn any capture into a PNG.
 - Fixture based metric tests: `/proc` and `/sys` readers are tested against
   recorded trees, including counter wraparound and rate calculations.
+- External sources are ordinary `metrics.Source` implementations, so command
+  and stdin data get the same sampling, history and rendering path as system
+  metrics.
 
 ## Install
 
@@ -86,6 +91,17 @@ Common flags:
 | `--no-sidebar` | hide the source sidebar |
 | `--demo` | synthetic data instead of live metrics — works without `/proc` |
 
+External data can be charted as well:
+
+| flag | meaning |
+| --- | --- |
+| `--stdin` | read one sample per line from standard input |
+| `-c, --command CMD` | run a shell command every interval and chart its output; repeat for several series |
+| `--label LIST` | comma separated series names, for example `rx,tx` |
+| `--unit UNIT` | `none`, `percent`, `bytes`, `bytes/s`, `count`, `rate`, `celsius`, `watts`, `load` or `seconds` |
+| `--timeout DUR` | command and stream read timeout (default `30s`) |
+| `-- CMD` | shorthand for `--command CMD` |
+
 The dashboard needs a terminal of at least **60×16** (columns × rows). Anything
 smaller gets a short notice asking for a resize rather than a chart squeezed
 into a space too small for it; `tui-chart snapshot` still prints a single chart
@@ -99,6 +115,53 @@ tui-chart --demo --theme nord      # explore the interface with synthetic data
 tui-chart sources                  # what can be charted on this machine
 tui-chart snapshot --demo -w 60 > chart.txt
 ```
+
+### Charting commands and pipes
+
+Anything that prints numbers can be a live chart with history. A single
+command is run once per sampling interval:
+
+```sh
+tui-chart --command 'ps aux | wc -l'
+tui-chart -i 2s --command 'sensors | awk "/Package id 0/ {print \$4}"'
+tui-chart --command 'df / | awk "NR==2 {print \$4}"' --unit bytes
+```
+
+Repeat `--command` for multiple series, or let one command print several
+numbers per sample:
+
+```sh
+tui-chart --label bash,ssh \
+  -c 'pgrep -c bash || true' -c 'pgrep -c sshd || true'
+```
+
+Streams work the same way: one line is one sample, and every number on the
+line becomes a series. Text around the numbers is ignored, so `temp=52.3C`
+needs no preprocessing. If stdin is a pipe and no command is given,
+`tui-chart` reads it automatically; the keyboard is then taken from the
+controlling terminal, so all normal keys still work.
+
+```sh
+while true; do
+  awk '{print $1}' /proc/loadavg
+  sleep 1
+done | tui-chart --stdin -i 1s
+
+printf 'rx tx\n120 80\n150 90\n' | tui-chart --stdin --label rx,tx
+```
+
+`snapshot` and `frame` accept the same flags, which makes external data easy
+to put in a script, a test or a screenshot:
+
+```sh
+seq 1 120 | tui-chart snapshot --stdin --samples 120 -w 120 > chart.txt
+tui-chart snapshot --command 'echo 42' --samples 10 --height 12
+```
+
+For streams, set `--interval` to the producer's cadence so the time axis
+labels match the data. Commands are sampled by `tui-chart` itself, so the
+interval is exact there. A command that takes longer than the interval delays
+the next update; `--timeout` caps a single run.
 
 ### Keys
 
@@ -159,7 +222,8 @@ internal/chart       rendering engine (no knowledge of system metrics)
   scale.go           nice tick selection, unit aware formatting
   series.go          ring buffers, statistics
   color.go           ramps, gamma correct blending, palette quantisation
-internal/metrics     /proc and /sys collectors exposed as chart series
+internal/metrics     /proc and /sys collectors exposed as chart series,
+                     plus command and stdin sources (external.go)
 internal/ui          bubbletea model: layout, panels, sidebar, overlays, input
 tools/ansipng        ANSI/VT capture → PNG renderer (verification tool)
 tools/ptytest        PTY driver that runs the real binary and captures output
@@ -234,6 +298,9 @@ and the `t` key.
   resize notice instead of a chart (`tui-chart snapshot` works down to 8×4).
 - The chart shows what the process sees; containerised environments may report
   host counters.
+- Command sources run synchronously on the sampling tick, so a command slower
+  than the interval limits the refresh rate; use `--timeout` to bound it.
+  Streams carry no timestamps, so set `--interval` to the producer's cadence.
 - Braille glyph rendering depends on the terminal font. Every common monospace
   font renders the pattern, but fonts without braille coverage fall back to
   empty cells — use `v` to switch to bars, or `--renderer bars`.

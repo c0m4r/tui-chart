@@ -357,6 +357,7 @@ func (m *Model) drawChartPanel(c *chart.Canvas, l layout) {
 	}
 	chartH := innerH - statsH
 	series := src.Series()
+	visible := visibleChartSeries(series)
 	renderer := m.renderer
 	if !m.rendererSet {
 		renderer = src.Preferred()
@@ -372,7 +373,7 @@ func (m *Model) drawChartPanel(c *chart.Canvas, l layout) {
 		Now:      m.clock,
 		Stacked:  src.Stacked(),
 		Smooth:   m.smooth,
-		LineFill: m.lineFill && renderer == chart.RendererLine && len(series) == 1,
+		LineFill: m.lineFill && renderer == chart.RendererLine && len(visible) == 1,
 		Grid:     m.grid,
 		Axis:     true,
 		TimeAxis: chartH >= 4,
@@ -400,12 +401,24 @@ func (m *Model) drawChartPanel(c *chart.Canvas, l layout) {
 	if statsH > 0 {
 		m.drawStatsStrip(c, innerX, innerY+chartH, innerW, series, src.Unit())
 	}
-	if len(series) == 0 || series[0].Len() < 2 {
+	if len(visible) == 0 || visible[0].Len() < 2 {
 		// A single point cannot describe a trend yet; say so instead of
 		// showing an empty grid.
 		msg := "collecting…"
 		c.TextCenter(innerX, innerY+chartH/2, innerW, msg, m.st(m.theme.Muted, m.theme.PanelBg).WithAttr(chart.AttrDim))
 	}
+}
+
+// visibleChartSeries filters hidden series, which dynamic sources use to keep
+// a stable series slice while only showing the columns that carry data.
+func visibleChartSeries(in []*chart.Series) []*chart.Series {
+	out := make([]*chart.Series, 0, len(in))
+	for _, s := range in {
+		if s != nil && !s.Hidden {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // legendRight builds the legend shown inside the panel's top border.
@@ -465,12 +478,13 @@ func (m *Model) frame(c *chart.Canvas, x, y, w, h int, title string, right []leg
 // drawStatsStrip renders current, average, min, max and p95 for the primary
 // series underneath the chart.
 func (m *Model) drawStatsStrip(c *chart.Canvas, x, y, w int, series []*chart.Series, unit chart.Unit) {
-	if len(series) == 0 || y < 0 || y >= c.H() {
+	visible := visibleChartSeries(series)
+	if len(visible) == 0 || y < 0 || y >= c.H() {
 		return
 	}
 	bg := m.theme.PanelBg
 	c.FillStyle(x, y, w, 1, m.st(m.theme.Fg, bg))
-	s := series[0]
+	s := visible[0]
 	st := chart.ComputeStats(s.Data, m.windowSamples)
 	items := []struct {
 		key string
@@ -701,7 +715,7 @@ func (m *Model) drawStatsPanel(c *chart.Canvas, l layout) {
 		return
 	}
 	src := m.sources[m.active]
-	series := src.Series()
+	series := visibleChartSeries(src.Series())
 	rows := len(series) + 3
 	w := 52
 	if w > l.w-4 {

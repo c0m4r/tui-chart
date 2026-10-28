@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -44,6 +45,21 @@ flags:
   -h, --help             show this help
   -v, --version          show the version
 
+external data:
+      --stdin            chart samples read from stdin, one line per sample
+  -c, --command CMD      run CMD every interval and chart its output
+                         (repeat -c for several series)
+      --label LIST       comma separated series names, e.g. rx,tx
+      --unit UNIT        none | percent | bytes | bytes/s | count | rate |
+                         celsius | watts | load | seconds
+      --timeout DUR      command and stream read timeout (default: 30s)
+      -- CMD             shorthand for --command CMD
+
+A sample may contain several numbers; each becomes a separate series. Text
+around the numbers is ignored, so "temp=52.3C" works as-is. When a pipe is
+connected to stdin, the dashboard reads it automatically and takes the
+keyboard from the controlling terminal.
+
 the dashboard needs a terminal of at least 60x16 (columns x rows); smaller
 windows print a resize notice instead of a chart that would be clipped.
 
@@ -60,11 +76,15 @@ snapshot flags:
       --no-color         disable colors (same as --color none)
 
 examples:
-  tui-chart                           live dashboard, cpu first
-  tui-chart -s memory                 start on the memory chart
-  tui-chart -i 500ms -w 120           twice a second, two minute window
-  tui-chart --demo --theme nord       explore the ui with synthetic data
-  tui-chart snapshot --demo -w 60     print a chart, useful in scripts
+  tui-chart                                live dashboard, cpu first
+  tui-chart -s memory                      start on the memory chart
+  tui-chart -i 500ms -w 120                twice a second, two minute window
+  tui-chart --demo --theme nord            explore the ui with synthetic data
+  tui-chart --command 'ps aux | wc -l'     chart a command's output
+  tui-chart -c 'pgrep -c bash' -c 'pgrep -c sshd'
+                                             two commands as two series
+  printf '1\n2\n3\n' | tui-chart --stdin   chart data from a pipe
+  seq 1 120 | tui-chart snapshot --stdin   render a stream as one chart
 `
 
 func themeList() string {
@@ -94,6 +114,14 @@ type options struct {
 	list        bool
 	keys        string
 	ticks       int
+
+	// external data sources
+	stdin    bool
+	commands []string
+	labels   []string
+	unit     chart.Unit
+	timeout  time.Duration
+	input    io.Reader
 }
 
 func main() {
@@ -116,6 +144,22 @@ func main() {
 	if opt.showVersion {
 		fmt.Println("tui-chart " + version)
 		return
+	}
+	// A dashboard started with a pipe on stdin reads that pipe as chart data.
+	// The keyboard is then taken from the controlling terminal, so normal
+	// navigation still works. This makes `producer | tui-chart` just work.
+	if cmd == "run" && !opt.demo && !opt.stdin && len(opt.commands) == 0 && !isTerminal(os.Stdin) {
+		opt.stdin = true
+	}
+	if err := validateOptions(opt); err != nil {
+		fmt.Fprintln(os.Stderr, "tui-chart: "+err.Error())
+		fmt.Fprintln(os.Stderr, "try 'tui-chart --help'")
+		os.Exit(2)
+	}
+	if cmd == "run" && opt.stdin && opt.input == os.Stdin && isTerminal(os.Stdin) {
+		fmt.Fprintln(os.Stderr, "tui-chart: --stdin needs a pipe or a file, not a terminal")
+		fmt.Fprintln(os.Stderr, "try 'tui-chart --command CMD' to sample a command instead")
+		os.Exit(2)
 	}
 	if cmd == "sources" || opt.list {
 		listSources(opt)
@@ -157,6 +201,8 @@ func parseFlags(args []string) (options, error) {
 		width:    100,
 		height:   22,
 		ticks:    90,
+		timeout:  30 * time.Second,
+		input:    os.Stdin,
 	}
 	need := func(i *int, name string) (string, error) {
 		if *i+1 >= len(args) {
@@ -256,6 +302,40 @@ func parseFlags(args []string) (options, error) {
 			}
 		case "--no-color", "--no-colour":
 			opt.color = "none"
+		case "--stdin":
+			opt.stdin = boolValue(hasValue, value, true)
+		case "-c", "--command":
+			var s string
+			if s, err = getValue(); err == nil {
+				if strings.TrimSpace(s) == "" {
+					err = fmt.Errorf("--command needs a command")
+				} else {
+					opt.commands = append(opt.commands, s)
+				}
+			}
+		case "--label", "--labels":
+			var s string
+			if s, err = getValue(); err == nil {
+				opt.labels = append(opt.labels, splitLabels(s)...)
+			}
+		case "--unit":
+			var s string
+			if s, err = getValue(); err == nil {
+				opt.unit, err = parseUnit(s)
+			}
+		case "--timeout":
+			var s string
+			if s, err = getValue(); err == nil {
+				opt.timeout, err = parseTimeout(s)
+			}
+		case "--":
+			rest := strings.TrimSpace(strings.Join(args[i+1:], " "))
+			if rest == "" {
+				err = fmt.Errorf("-- needs a command")
+			} else {
+				opt.commands = append(opt.commands, rest)
+			}
+			i = len(args)
 		default:
 			return opt, fmt.Errorf("unknown flag %q", name)
 		}
@@ -298,6 +378,65 @@ func parseDuration(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid interval %q", s)
 	}
 	return d, nil
+}
+
+// parseTimeout is parseDuration with an error message that names the flag.
+func parseTimeout(s string) (time.Duration, error) {
+	d, err := parseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid timeout %q", s)
+	}
+	return d, nil
+}
+
+// splitLabels parses a comma separated series name list.
+func splitLabels(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if name := strings.TrimSpace(part); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// parseUnit maps a human readable unit name to the chart unit used for axis
+// and legend formatting.
+func parseUnit(s string) (chart.Unit, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "none", "number", "raw":
+		return chart.UnitNone, nil
+	case "%", "percent", "pct":
+		return chart.UnitPercent, nil
+	case "b", "byte", "bytes":
+		return chart.UnitBytes, nil
+	case "b/s", "byte/s", "bytes/s":
+		return chart.UnitBytesRate, nil
+	case "count", "counts":
+		return chart.UnitCount, nil
+	case "/s", "rate":
+		return chart.UnitRate, nil
+	case "c", "°c", "celsius":
+		return chart.UnitCelsius, nil
+	case "w", "watt", "watts":
+		return chart.UnitWatts, nil
+	case "load":
+		return chart.UnitLoad, nil
+	case "s", "second", "seconds", "time":
+		return chart.UnitSeconds, nil
+	}
+	return chart.UnitNone, fmt.Errorf("unknown unit %q", s)
+}
+
+// validateOptions rejects combinations that cannot be charted.
+func validateOptions(opt options) error {
+	switch {
+	case opt.stdin && len(opt.commands) > 0:
+		return fmt.Errorf("--stdin and --command cannot be combined")
+	case opt.demo && (opt.stdin || len(opt.commands) > 0):
+		return fmt.Errorf("--demo cannot be combined with --stdin or --command")
+	}
+	return nil
 }
 
 // colorMode resolves the color capability for standard output.
@@ -347,10 +486,41 @@ func themeFor(opt options) ui.Theme {
 }
 
 func buildSources(opt options) []metrics.Source {
-	return metrics.All(metrics.Options{
+	sources := metrics.All(metrics.Options{
 		Capacity: opt.history,
 		Demo:     opt.demo,
 	})
+	if opt.demo {
+		return sources
+	}
+	var ext metrics.Source
+	if opt.stdin {
+		reader := opt.input
+		if reader == nil {
+			reader = os.Stdin
+		}
+		ext = metrics.NewExternalSource(metrics.ExternalOptions{
+			Capacity: opt.history,
+			Reader:   reader,
+			Labels:   opt.labels,
+			Unit:     opt.unit,
+			Timeout:  opt.timeout,
+		})
+	} else if len(opt.commands) > 0 {
+		ext = metrics.NewExternalSource(metrics.ExternalOptions{
+			Capacity: opt.history,
+			Commands: opt.commands,
+			Labels:   opt.labels,
+			Unit:     opt.unit,
+			Timeout:  opt.timeout,
+		})
+	}
+	if ext != nil {
+		// External data is the reason the user started the program, so show it
+		// first instead of making them hunt for a tab.
+		sources = append([]metrics.Source{ext}, sources...)
+	}
+	return sources
 }
 
 func listSources(opt options) {
@@ -370,6 +540,9 @@ func listSources(opt options) {
 }
 
 func runDashboard(opt options) error {
+	if err := validateOptions(opt); err != nil {
+		return err
+	}
 	sources := buildSources(opt)
 	if len(sources) == 0 {
 		return fmt.Errorf("no metric sources available (is /proc mounted?)")
@@ -407,11 +580,17 @@ func runDashboard(opt options) error {
 	if active != 0 {
 		model = withActive(model, active)
 	}
-	p := tea.NewProgram(model,
+	programOpts := []tea.ProgramOption{
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 		tea.WithoutSignalHandler(),
-	)
+	}
+	if opt.stdin {
+		// stdin carries data, so the keyboard has to come from the
+		// controlling terminal instead.
+		programOpts = append(programOpts, tea.WithInputTTY())
+	}
+	p := tea.NewProgram(model, programOpts...)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("%w\n"+
 			"       the dashboard needs an interactive terminal: "+
@@ -444,6 +623,9 @@ func runSnapshot(opt options) error {
 // snapshotText renders one chart and returns it as text. When colors are
 // disabled the result is plain text, which makes it easy to assert on.
 func snapshotText(opt options) (string, error) {
+	if err := validateOptions(opt); err != nil {
+		return "", err
+	}
 	sources := buildSources(opt)
 	if len(sources) == 0 {
 		return "", fmt.Errorf("no metric sources available")
@@ -462,9 +644,21 @@ func snapshotText(opt options) (string, error) {
 		rounds = opt.window
 	}
 	if !opt.demo {
+		stream := false
 		for i := 0; i < rounds; i++ {
+			if s, ok := src.(interface {
+				WaitSample(time.Duration) bool
+				Stream() bool
+			}); ok && s.Stream() {
+				stream = true
+				// Data-driven samples arrive on their own schedule; wait for
+				// the next row instead of sleeping for a fixed interval.
+				if !s.WaitSample(opt.timeout) {
+					break
+				}
+			}
 			src.Sample()
-			if i < rounds-1 {
+			if i < rounds-1 && !stream {
 				time.Sleep(opt.interval)
 			}
 		}
@@ -526,6 +720,9 @@ func snapshotText(opt options) (string, error) {
 // model the interactive program uses, so it doubles as a screenshot tool and a
 // smoke test that needs no pty.
 func runFrame(opt options) error {
+	if err := validateOptions(opt); err != nil {
+		return err
+	}
 	sources := buildSources(opt)
 	if len(sources) == 0 {
 		return fmt.Errorf("no metric sources available")
@@ -557,10 +754,20 @@ func runFrame(opt options) error {
 		model = model.SeedHistory(opt.ticks)
 	} else {
 		// Live counters need real elapsed time between reads, otherwise every
-		// rate is zero.
+		// rate is zero. A stream, on the other hand, waits for its own rows.
+		stream := false
 		for i := 0; i < opt.ticks; i++ {
+			if s, ok := model.ActiveSource().(interface {
+				WaitSample(time.Duration) bool
+				Stream() bool
+			}); ok && s.Stream() {
+				stream = true
+				if !s.WaitSample(opt.timeout) {
+					break
+				}
+			}
 			model = model.WithTick(time.Now())
-			if i < opt.ticks-1 {
+			if i < opt.ticks-1 && !stream {
 				time.Sleep(opt.interval)
 			}
 		}

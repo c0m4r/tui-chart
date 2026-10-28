@@ -436,3 +436,31 @@ func wheelMsg(up bool) tea.MouseMsg {
 	}
 	return tea.MouseMsg{Action: tea.MouseActionPress, Button: b, X: 10, Y: 10}
 }
+
+// TestHiddenExternalSeriesStayOutOfStats guards the dynamic external source:
+// it preallocates columns so the series slice is stable, but only the columns
+// that actually carry data may show up in legends and tables.
+func TestHiddenExternalSeriesStayOutOfStats(t *testing.T) {
+	src := metrics.NewExternalSource(metrics.ExternalOptions{
+		Capacity: 20,
+		Commands: []string{"echo 42"},
+	})
+	src.Sample()
+	m := New(Config{
+		Sources:  []metrics.Source{src},
+		Interval: time.Second,
+		Window:   10,
+		Sidebar:  true,
+		Mode:     chart.ColorNone,
+		Theme:    Themes["midnight"],
+		Version:  "test",
+	}).WithSize(100, 30)
+	m = m.WithKey("s")
+	plain := chart.StripANSI(strings.Join(m.Frame(100, 30), "\n"))
+	if !strings.Contains(plain, "statistics") {
+		t.Fatalf("statistics panel is missing:\n%s", plain)
+	}
+	if strings.Contains(plain, "value 2") {
+		t.Errorf("unused series leaked into the statistics table:\n%s", plain)
+	}
+}

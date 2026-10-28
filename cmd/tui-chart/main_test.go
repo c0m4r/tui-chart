@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/c0m4r/tui-chart/internal/chart"
+	"github.com/c0m4r/tui-chart/internal/metrics"
 )
 
 func TestParseFlagsDefaults(t *testing.T) {
@@ -217,5 +218,141 @@ func TestBoolValue(t *testing.T) {
 	}
 	if !boolValue(true, "yes", false) {
 		t.Error("--flag=yes should be true")
+	}
+}
+
+func TestParseFlagsExternal(t *testing.T) {
+	opt, err := parseFlags([]string{
+		"--stdin", "--label", "rx, tx", "--unit", "bytes/s", "--timeout", "5s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opt.stdin || len(opt.labels) != 2 || opt.labels[1] != "tx" {
+		t.Errorf("stdin/labels = %v/%v", opt.stdin, opt.labels)
+	}
+	if opt.unit != chart.UnitBytesRate {
+		t.Errorf("unit = %v", opt.unit)
+	}
+	if opt.timeout != 5*time.Second {
+		t.Errorf("timeout = %v", opt.timeout)
+	}
+	opt, err = parseFlags([]string{
+		"--command", "echo 1", "-c", "echo 2", "--", "echo 3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opt.commands) != 3 || opt.commands[2] != "echo 3" {
+		t.Errorf("commands = %v", opt.commands)
+	}
+}
+
+func TestParseUnit(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want chart.Unit
+	}{
+		{"", chart.UnitNone},
+		{"percent", chart.UnitPercent},
+		{"%", chart.UnitPercent},
+		{"GiB", chart.UnitNone},
+		{"bytes", chart.UnitBytes},
+		{"B/s", chart.UnitBytesRate},
+		{"count", chart.UnitCount},
+		{"rate", chart.UnitRate},
+		{"celsius", chart.UnitCelsius},
+		{"watts", chart.UnitWatts},
+		{"load", chart.UnitLoad},
+		{"seconds", chart.UnitSeconds},
+	} {
+		got, err := parseUnit(tc.in)
+		if tc.in == "GiB" {
+			if err == nil {
+				t.Errorf("unknown unit %q should fail", tc.in)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("parseUnit(%q) = %v, %v", tc.in, got, err)
+		}
+	}
+}
+
+func TestValidateOptions(t *testing.T) {
+	if err := validateOptions(options{stdin: true, commands: []string{"true"}}); err == nil {
+		t.Error("stdin and command should conflict")
+	}
+	if err := validateOptions(options{demo: true, stdin: true}); err == nil {
+		t.Error("demo and stdin should conflict")
+	}
+	if err := validateOptions(options{stdin: true}); err != nil {
+		t.Errorf("valid options rejected: %v", err)
+	}
+}
+
+func TestSnapshotFromStdin(t *testing.T) {
+	// Keep the test independent of the host's /proc and /sys.
+	oldProc, oldSys := metrics.ProcRoot, metrics.SysRoot
+	metrics.ProcRoot, metrics.SysRoot = "nonexistent", "nonexistent"
+	t.Cleanup(func() { metrics.ProcRoot, metrics.SysRoot = oldProc, oldSys })
+
+	out, err := snapshotText(options{
+		stdin: true, input: strings.NewReader("1 5\n2 6\n3 7\n4 8\n"),
+		samples: 4, window: 4, history: 20, interval: time.Second,
+		width: 70, height: 12, color: "none", timeout: time.Second,
+		labels: []string{"rx", "tx"}, unit: chart.UnitBytes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Error("plain output must not contain escape sequences")
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) != 12 {
+		t.Fatalf("got %d lines, want 12", len(lines))
+	}
+	for i, l := range lines {
+		if w := len([]rune(l)); w != 70 {
+			t.Errorf("line %d is %d runes wide, want 70", i, w)
+		}
+	}
+	plain := strings.Join(lines, "\n")
+	if !strings.Contains(plain, "8B") {
+		t.Errorf("chart is missing the unit label:\n%s", plain)
+	}
+}
+
+func TestSnapshotFromCommand(t *testing.T) {
+	out, err := snapshotText(options{
+		commands: []string{"echo 42"},
+		samples:  3, window: 3, history: 20, interval: time.Millisecond,
+		width: 60, height: 10, color: "none", timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) != 10 {
+		t.Fatalf("got %d lines, want 10", len(lines))
+	}
+	for i, l := range lines {
+		if w := len([]rune(l)); w != 60 {
+			t.Errorf("line %d is %d runes wide, want 60", i, w)
+		}
+	}
+	if !strings.ContainsAny(out, "█▇▆▅▄▃▂▁") {
+		t.Error("command chart has no filled area")
+	}
+}
+
+func TestSnapshotRejectsConflictingExternalFlags(t *testing.T) {
+	_, err := snapshotText(options{
+		stdin: true, input: strings.NewReader("1\n"),
+		commands: []string{"echo 1"},
+	})
+	if err == nil {
+		t.Error("snapshot should reject --stdin together with --command")
 	}
 }
