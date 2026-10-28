@@ -17,7 +17,7 @@ import (
 )
 
 // version is overridden at build time with -ldflags "-X main.version=...".
-var version = "0.1.0"
+var version = "0.2.0"
 
 var usage = `tui-chart — high resolution live charts for the terminal
 
